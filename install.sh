@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# Exit immediately if a command exits with a non-zero status
-set -eE
+# Removed the "Exit immediately if a command exits with a non-zero status" due to apple-bce driver during ISO creation
+set -e
 
 OMARCHY_PATH="$HOME/.local/share/omarchy"
 OMARCHY_INSTALL="$OMARCHY_PATH/install"

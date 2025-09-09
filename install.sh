@@ -13,7 +13,6 @@ source $OMARCHY_INSTALL/preflight/chroot.sh
 source $OMARCHY_INSTALL/preflight/pacman.sh
 source $OMARCHY_INSTALL/preflight/migrations.sh
 source $OMARCHY_INSTALL/preflight/first-run-mode.sh
-source $OMARCHY_INSTALL/preflight/linux-preset-t2.sh
 
 # Packaging
 source $OMARCHY_INSTALL/packages.sh
@@ -51,6 +50,7 @@ source $OMARCHY_INSTALL/config/hardware/fix-suspend-t2.sh
 source $OMARCHY_INSTALL/config/hardware/keyboard-brightness-t2.sh
 
 # Login
+source $OMARCHY_INSTALL/login/linux-preset-t2.sh
 source $OMARCHY_INSTALL/login/plymouth.sh
 source $OMARCHY_INSTALL/login/limine-snapper.sh
 source $OMARCHY_INSTALL/login/alt-bootloaders.sh

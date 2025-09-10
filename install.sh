@@ -47,15 +47,15 @@ source $OMARCHY_INSTALL/config/hardware/ignore-power-button.sh
 source $OMARCHY_INSTALL/config/hardware/nvidia.sh
 source $OMARCHY_INSTALL/config/hardware/fix-f13-amd-audio-input.sh
 
-# Login
-source $OMARCHY_INSTALL/login/plymouth.sh
-source $OMARCHY_INSTALL/login/limine-snapper.sh
-source $OMARCHY_INSTALL/login/alt-bootloaders.sh
-
 # T2
 source $OMARCHY_INSTALL/config/t2/linux-preset-t2.sh
 source $OMARCHY_INSTALL/config/t2/fix-suspend-t2.sh
 source $OMARCHY_INSTALL/config/t2/keyboard-brightness-t2.sh
+
+# Login
+source $OMARCHY_INSTALL/login/plymouth.sh
+source $OMARCHY_INSTALL/login/limine-snapper.sh
+source $OMARCHY_INSTALL/login/alt-bootloaders.sh
 
 # Finishing
 source $OMARCHY_INSTALL/reboot.sh

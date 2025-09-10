@@ -3,8 +3,6 @@
 sudo pacman -S --noconfirm --needed \
   1password-beta \
   1password-cli \
-  apple-t2-audio-config \
-  apple-bcm-firmware \
   asdcontrol-git \
   alacritty \
   avahi \
@@ -61,7 +59,6 @@ sudo pacman -S --noconfirm --needed \
   less \
   libqalculate \
   libreoffice \
-  linux-t2 \
   llvm \
   localsend \
   luarocks \
@@ -102,8 +99,6 @@ sudo pacman -S --noconfirm --needed \
   swaybg \
   swayosd \
   system-config-printer \
-  t2fanrd \
-  tiny-dfr \
   tldr \
   tree-sitter-cli \
   ttf-cascadia-mono-nerd \

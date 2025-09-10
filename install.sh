@@ -51,6 +51,7 @@ source $OMARCHY_INSTALL/config/hardware/fix-f13-amd-audio-input.sh
 
 # Login
 source $OMARCHY_INSTALL/login/plymouth.sh
+source $OMARCHY_INSTALL/login/t2-preset.sh
 source $OMARCHY_INSTALL/login/limine-snapper.sh
 source $OMARCHY_INSTALL/login/alt-bootloaders.sh
 

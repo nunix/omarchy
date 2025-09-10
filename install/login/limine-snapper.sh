@@ -5,10 +5,6 @@ if command -v limine &>/dev/null; then
 HOOKS=(base udev plymouth keyboard autodetect microcode modconf kms keymap consolefont block encrypt filesystems fsck btrfs-overlayfs)
 EOF
 
-  # T2 settings
-  sudo sed -i 's/(btrfs/(btrfs apple-bce/' /etc/mkinitcpio.conf
-  sudo rm /etc/mkinitcpio.d/linux.preset
-
   [[ -f /boot/EFI/limine/limine.conf ]] && EFI=true
 
   # Conf location is different between EFI and BIOS

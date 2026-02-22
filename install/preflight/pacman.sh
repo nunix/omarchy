@@ -20,4 +20,4 @@
 
   # Refresh all repos
   sudo pacman -Syyu --noconfirm
-3fi
+#fi

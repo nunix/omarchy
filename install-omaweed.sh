@@ -61,7 +61,23 @@ sudo zypper --non-interactive in --no-recommends \
     nerdfonts-symbolsonly-fonts fontawesome-fonts fira-code-fonts google-noto-fonts \
     google-noto-coloremoji-fonts google-noto-sans-cjk-fonts breeze6-cursors || true
 
-# --- 3. Deploy Pacman & Arch Compatibility Shims ---
+# --- 3. Install OPI (OBS Package Installer, AUR replacement for Tumbleweed) ---
+log "Installing opi (openSUSE Build Service package finder, replaces AUR/yay)..."
+if ! command -v opi >/dev/null 2>&1; then
+    sudo zypper --non-interactive in opi 2>/dev/null || {
+        warn "opi not in configured repos, building from source (cargo)..."
+        BUILD_DIR=$(mktemp -d)
+        git clone --depth 1 https://github.com/openSUSE/opi.git "$BUILD_DIR"
+        (
+            cd "$BUILD_DIR"
+            cargo build --release
+            sudo install -m 755 target/release/opi /usr/local/bin/opi
+        )
+        rm -rf "$BUILD_DIR"
+    }
+fi
+
+# --- 4. Deploy Pacman & Arch Compatibility Shims ---
 log "Deploying Arch Linux / Pacman compatibility shims to /usr/bin..."
 
 sudo tee /usr/bin/pacman >/dev/null << 'EOF'
@@ -200,7 +216,71 @@ sudo chmod +x /usr/bin/pacman-key
 
 sudo tee /usr/bin/yay >/dev/null << 'EOF'
 #!/usr/bin/env bash
-exit 0
+# /usr/bin/yay - openSUSE Tumbleweed OPI shim for Arch AUR calls (Omaweed)
+# Real AUR has no Tumbleweed equivalent; opi searches/installs from the
+# openSUSE Build Service (OBS), the closest analog for community packages.
+
+# Known AUR -> OBS/opi search-term translations for packages Omarchy installs
+# via omarchy-pkg-aur-add (browsers, editors). Unmapped names are tried as-is.
+translate_aur_pkg() {
+    local p="$1"
+    p="${p#aur/}"
+    case "$p" in
+        google-chrome) echo "google-chrome-stable" ;;
+        microsoft-edge-stable-bin) echo "microsoft-edge-stable" ;;
+        brave-bin) echo "brave-browser" ;;
+        brave-origin-bin) echo "brave-browser" ;;
+        zen-browser-bin) echo "zen-browser" ;;
+        omarchy-emacs) echo "emacs" ;;
+        *) echo "$p" ;;
+    esac
+}
+
+cmd="${1:-}"
+shift || true
+
+case "$cmd" in
+    -V|--version)
+        echo "yay (Omaweed OPI shim, backed by opi/OBS)"
+        exit 0
+        ;;
+    -S|-Sy)
+        for arg in "$@"; do
+            [[ "$arg" == --* || "$arg" == -* ]] && continue
+            pkg=$(translate_aur_pkg "$arg")
+            if command -v opi >/dev/null 2>&1; then
+                echo "[omaweed] Searching OBS for '$pkg' (AUR: $arg) via opi..." >&2
+                sudo opi "$pkg" || echo "[omaweed] No OBS match for '$pkg'. Install manually." >&2
+            else
+                echo "[omaweed] opi missing, cannot resolve AUR package '$arg'." >&2
+            fi
+        done
+        exit 0
+        ;;
+    -Slqa|-Slq|-Sl)
+        # AUR full listing has no OBS equivalent; report empty rather than fake data.
+        exit 0
+        ;;
+    -Sua)
+        echo "[omaweed] Bulk AUR updates unsupported under the OPI shim; re-run 'yay -S <pkg>' per package." >&2
+        exit 0
+        ;;
+    -Qqe|-Qq|-Q)
+        rpm -qa --qf "%{NAME}\n"
+        exit 0
+        ;;
+    -Qi)
+        rpm -qi "$@"
+        exit 0
+        ;;
+    -Siia|-Si)
+        opi -d "$(translate_aur_pkg "${1:-}")" 2>/dev/null || zypper info "$@"
+        exit 0
+        ;;
+    *)
+        exit 0
+        ;;
+esac
 EOF
 sudo chmod +x /usr/bin/yay
 
@@ -210,7 +290,7 @@ exit 0
 EOF
 sudo chmod +x /usr/bin/checkupdates
 
-# --- 4. Install Missing Native / Custom Binaries ---
+# --- 5. Install Missing Native / Custom Binaries ---
 log "Installing specialized tooling (gum, dua, mise, omacalc, ttfx, herdr, SwayOSD)..."
 
 # gum
@@ -325,7 +405,7 @@ for bin in /usr/local/bin/*; do
     fi
 done
 
-# --- 5. Clone Omarchy Core & Setup Environment ---
+# --- 6. Clone Omarchy Core & Setup Environment ---
 log "Setting up Omarchy core repository (/usr/share/omarchy)..."
 
 OMARCHY_REPO="${OMARCHY_REPO:-nunix/omarchy}"
@@ -371,7 +451,7 @@ ln -sfn /usr/share/omarchy "$HOME/.local/share/omarchy"
 sudo mkdir -p /root/.local/share
 sudo ln -sfn /usr/share/omarchy /root/.local/share/omarchy
 
-# --- 6. Polkit Rules for Power Management ---
+# --- 7. Polkit Rules for Power Management ---
 log "Configuring Polkit power management rules..."
 sudo mkdir -p /etc/polkit-1/rules.d
 sudo tee /etc/polkit-1/rules.d/10-enable-power.rules >/dev/null << EOF
@@ -390,21 +470,21 @@ polkit.addRule(function(action, subject) {
 });
 EOF
 
-# --- 7. Apply openSUSE Compatibility Patches ---
+# --- 8. Apply openSUSE Compatibility Patches ---
 log "Applying compatibility patches to Omarchy tree..."
 
-# 7.1 Snapper non-Btrfs guard
+# 8.1 Snapper non-Btrfs guard
 if [ -f /usr/share/omarchy/install/config/snapper.sh ]; then
     sed -i 's/sudo snapper --no-dbus -c root create-config \/ 2>\/dev\/null/sudo snapper --no-dbus -c root create-config \/ 2>\/dev\/null || true/' /usr/share/omarchy/install/config/snapper.sh
 fi
 
-# 7.2 Bluetooth rfkill guard
+# 8.2 Bluetooth rfkill guard
 if [ -f /usr/share/omarchy/bin/omarchy-bluetooth-power ]; then
     sed -i 's/rfkill unblock bluetooth/command -v rfkill >\/dev\/null \&\& [ -e \/dev\/rfkill ] \&\& rfkill unblock bluetooth || true/' /usr/share/omarchy/bin/omarchy-bluetooth-power
     sed -i 's/rfkill block bluetooth/command -v rfkill >\/dev\/null \&\& [ -e \/dev\/rfkill ] \&\& rfkill block bluetooth || true/' /usr/share/omarchy/bin/omarchy-bluetooth-power
 fi
 
-# 7.3 Update scripts OMARCHY_PATH guards across all scripts
+# 8.3 Update scripts OMARCHY_PATH guards across all scripts
 python3 -c '
 import glob, os
 for path in glob.glob("/usr/share/omarchy/bin/*"):
@@ -423,26 +503,26 @@ for path in glob.glob("/usr/share/omarchy/bin/*"):
 '
 rm -f /tmp/patched_bin 2>/dev/null || true
 
-# 7.4 Update restart WSL2 and non-interactive guards
+# 8.4 Update restart WSL2 and non-interactive guards
 if [ -f /usr/share/omarchy/bin/omarchy-update-restart ]; then
     if ! grep -q 'grep -qi microsoft /proc/version' /usr/share/omarchy/bin/omarchy-update-restart; then
         sed -i '/kernel_updated=true/a if grep -qi microsoft /proc/version 2>/dev/null; then kernel_updated=false; fi' /usr/share/omarchy/bin/omarchy-update-restart
     fi
 fi
 
-# 7.5 Migration 1785608166 systemd-resolved guard
+# 8.5 Migration 1785608166 systemd-resolved guard
 MIGRATION_RESOLVED="/usr/share/omarchy/migrations/1785608166.sh"
 if [ -f "$MIGRATION_RESOLVED" ]; then
     sed -i 's/sudo systemctl restart systemd-resolved.service/if systemctl is-active --quiet systemd-resolved.service 2>\/dev\/null; then sudo systemctl restart systemd-resolved.service; fi/' "$MIGRATION_RESOLVED"
 fi
 
-# 7.6 Rebrand omarchy-update to Omaweed
+# 8.6 Rebrand omarchy-update to Omaweed
 if [ -f /usr/share/omarchy/bin/omarchy-update ]; then
     sed -i 's/header "Updating Omarchy"/header "Updating Omaweed (Tumbleweed)"/' /usr/share/omarchy/bin/omarchy-update
     sed -i 's/Omarchy has been updated/Omaweed has been updated/' /usr/share/omarchy/bin/omarchy-update
 fi
 
-# 7.7 Omarchy Quattro Shell IPC & Dispatcher compatibility
+# 8.7 Omarchy Quattro Shell IPC & Dispatcher compatibility
 if [ -f /usr/share/omarchy/bin/omarchy-shell ]; then
     sudo sed -i 's/qs ipc -n -p/qs ipc -n --any-display -p/g' /usr/share/omarchy/bin/omarchy-shell
 fi
@@ -451,7 +531,34 @@ if [ -f /usr/share/omarchy/bin/omarchy-restart-shell ]; then
     sudo sed -i 's|hyprctl dispatch .hl.dsp.exec_cmd("omarchy-launch-shell"). >/dev/null|hyprctl dispatch exec omarchy-launch-shell >/dev/null 2>\&1|g' /usr/share/omarchy/bin/omarchy-restart-shell
 fi
 
-# --- 8. Display Manager & Desktop Service Configuration ---
+# 8.8 AUR reachability check -> OBS reachability (opi backend, not aur.archlinux.org)
+if [ -f /usr/share/omarchy/bin/omarchy-pkg-aur-accessible ]; then
+    sudo sed -i 's|"https://aur.archlinux.org/rpc/?v=5\&type=info\&arg=base"|"https://api.opensuse.org/public/build/openSUSE:Factory/standard/x86_64/opi"|' /usr/share/omarchy/bin/omarchy-pkg-aur-accessible
+fi
+
+# 8.9 Drop desktop AI apps with no Tumbleweed/OBS equivalent (Arch-binary-only
+# packages: ChatGPT Desktop, Hermes Desktop app, Grok Bot, LM Studio, Ollama,
+# T3 Code). CLI agents (claude, pi, hermes CLI, codex, etc.) are unaffected --
+# those install through mise, not pacman/AUR, and stay fully supported.
+log "Removing unsupported desktop AI app menu entries (no OBS/RPM equivalent)..."
+MENU_FILE="/usr/share/omarchy/default/omarchy/omarchy-menu.jsonc"
+if [ -f "$MENU_FILE" ]; then
+    sudo sed -i -E '/"(install|remove)\.ai\.(chatgpt|grok-bot|hermes|lm-studio|ollama|t3-code)":/d' "$MENU_FILE"
+fi
+for f in omarchy-install-ai-chatgpt omarchy-install-ai-hermes omarchy-remove-ai-chatgpt omarchy-remove-ai-grok-bot omarchy-remove-ai-hermes omarchy-remove-ai-lm-studio omarchy-remove-ai-ollama omarchy-remove-ai-t3-code; do
+    fpath="/usr/share/omarchy/bin/$f"
+    if [ -f "$fpath" ]; then
+        sudo tee "$fpath" >/dev/null << 'EOF'
+#!/bin/bash
+echo "$(basename "$0") is unsupported on Omaweed (openSUSE Tumbleweed): it packages an" >&2
+echo "Arch-binary-only app with no OBS/RPM equivalent. Removed from the Install/Remove > AI menu." >&2
+exit 1
+EOF
+        sudo chmod +x "$fpath"
+    fi
+done
+
+# --- 9. Display Manager & Desktop Service Configuration ---
 log "Configuring SDDM display manager and system services..."
 sudo mkdir -p /etc/sddm.conf.d
 cat << EOF | sudo tee /etc/sddm.conf.d/autologin.conf >/dev/null
@@ -472,7 +579,7 @@ sudo systemctl enable bluetooth.service 2>/dev/null || true
 sudo systemctl enable sshd.service 2>/dev/null || true
 sudo usermod -aG wheel,video,audio,input,render "$USER" 2>/dev/null || true
 
-# --- 9. Provision User & Initialize State ---
+# --- 10. Provision User & Initialize State ---
 log "Provisioning user dotfiles, fonts, and runtime services..."
 mkdir -p "$HOME/.config"
 cp -R /usr/share/omarchy/config/* "$HOME/.config/"
@@ -509,7 +616,7 @@ EOF
 export OMARCHY_PATH=/usr/share/omarchy
 omarchy-theme-set "Tokyo Night" 2>/dev/null || true
 
-# --- 10. Configure WayVNC Remote Management ---
+# --- 11. Configure WayVNC Remote Management ---
 log "Configuring WayVNC remote management service..."
 sudo tee /usr/local/bin/wayvnc-autostart >/dev/null << 'EOF'
 #!/usr/bin/env bash

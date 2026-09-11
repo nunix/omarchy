@@ -1,0 +1,27 @@
+#!/bin/bash
+
+# omarchy:summary=Show a fuzzy-finder TUI for picking new Flatpak apps (Flathub) to install.
+
+query=$(gum input --prompt 'Flatpak search> ' --placeholder 'app name (spotify, discord, obsidian...)')
+[[ -z $query ]] && exit 0
+
+fzf_args=(
+  --multi
+  --with-nth 1,2,6
+  --delimiter '\t'
+  --preview 'flatpak remote-info --log flathub {3}'
+  --preview-label='alt-p: toggle description, alt-j/k: scroll, tab: multi-select'
+  --preview-label-pos='bottom'
+  --preview-window 'down:65%:wrap'
+  --bind 'alt-p:toggle-preview'
+  --bind 'alt-d:preview-half-page-down,alt-u:preview-half-page-up'
+  --bind 'alt-k:preview-up,alt-j:preview-down'
+  --color 'pointer:green,marker:green'
+)
+
+app_ids=$(flatpak search "$query" | fzf "${fzf_args[@]}" | cut -f3)
+
+if [[ -n $app_ids ]]; then
+  echo "$app_ids" | tr '\n' ' ' | xargs flatpak install -y --user flathub
+  omarchy-show-done
+fi

@@ -1,0 +1,496 @@
+#!/usr/bin/python3
+# omarchy:summary=Print the Antigravity / Vertex AI usage record as JSON
+# omarchy:args=[--force] [--limits-only]
+# omarchy:hidden=true
+"""Collect Antigravity (agy) and Vertex AI usage into one display-ready JSON record.
+
+Token stats come from local conversation databases in ~/.gemini/antigravity-cli/
+and session history. Calculates token breakdowns (input, output, cache read, cache write)
+along with estimated API pricing based on standard Vertex AI / Gemini rates.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import re
+import sqlite3
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+AGENT_ID = "agy"
+AGENT_NAME = "Antigravity"
+AUTH_HELP = "Sign in with `agy` or configure Google Cloud credentials in ~/.gemini/antigravity-cli/settings.json."
+
+# Standard pricing in USD per 1,000,000 tokens:
+# (input_per_m, output_per_m, cache_read_per_m, cache_write_per_m)
+MODEL_PRICING: dict[str, tuple[float, float, float, float]] = {
+    # Gemini Flash models
+    "gemini-3.8-flash": (0.15, 0.60, 0.0375, 0.15),
+    "gemini-3-flash": (0.15, 0.60, 0.0375, 0.15),
+    "gemini-2.5-flash": (0.15, 0.60, 0.0375, 0.15),
+    "gemini-2.0-flash": (0.10, 0.40, 0.025, 0.10),
+    "gemini-1.5-flash": (0.075, 0.30, 0.01875, 0.075),
+    # Gemini Pro models
+    "gemini-2.5-pro": (1.25, 10.00, 0.3125, 1.25),
+    "gemini-1.5-pro": (1.25, 5.00, 0.3125, 1.25),
+    # Claude models on Vertex AI / Bedrock / Anthropic
+    "claude-sonnet-5": (3.00, 15.00, 0.30, 3.75),
+    "claude-sonnet-4": (3.00, 15.00, 0.30, 3.75),
+    "claude-3-5-sonnet": (3.00, 15.00, 0.30, 3.75),
+    "claude-opus-5": (15.00, 75.00, 1.50, 18.75),
+    "claude-opus-4": (15.00, 75.00, 1.50, 18.75),
+    "claude-3-5-haiku": (0.80, 4.00, 0.08, 1.00),
+}
+
+
+def get_pricing(model_name: str) -> tuple[float, float, float, float]:
+    clean = model_name.lower().replace("google/", "").replace("vertex/", "").strip()
+    if clean in MODEL_PRICING:
+        return MODEL_PRICING[clean]
+    for k, v in MODEL_PRICING.items():
+        if clean.startswith(k) or k.startswith(clean):
+            return v
+    if "flash" in clean:
+        return (0.15, 0.60, 0.0375, 0.15)
+    if "pro" in clean:
+        return (1.25, 10.00, 0.3125, 1.25)
+    if "opus" in clean:
+        return (15.00, 75.00, 1.50, 18.75)
+    if "sonnet" in clean:
+        return (3.00, 15.00, 0.30, 3.75)
+    if "haiku" in clean:
+        return (0.80, 4.00, 0.08, 1.00)
+    return (0.15, 0.60, 0.0375, 0.15)
+
+
+def compute_cost(inp: int, out: int, cache_read: int, cache_write: int, pricing: tuple[float, float, float, float]) -> float:
+    inp_rate, out_rate, read_rate, write_rate = pricing
+    cost = (
+        (inp * inp_rate) +
+        (out * out_rate) +
+        (cache_read * read_rate) +
+        (cache_write * write_rate)
+    ) / 1_000_000.0
+    return round(cost, 4)
+
+
+def parse_proto(b: bytes) -> list[tuple[int, str, Any]]:
+    pos = 0
+    fields = []
+    length_bytes = len(b)
+    while pos < length_bytes:
+        key = 0
+        shift = 0
+        while pos < length_bytes:
+            byte = b[pos]
+            pos += 1
+            key |= (byte & 0x7F) << shift
+            if not (byte & 0x80):
+                break
+            shift += 7
+        field_num = key >> 3
+        wire_type = key & 7
+        if wire_type == 0:
+            val = 0
+            shift = 0
+            while pos < length_bytes:
+                byte = b[pos]
+                pos += 1
+                val |= (byte & 0x7F) << shift
+                if not (byte & 0x80):
+                    break
+                shift += 7
+            fields.append((field_num, "varint", val))
+        elif wire_type == 2:
+            length = 0
+            shift = 0
+            while pos < length_bytes:
+                byte = b[pos]
+                pos += 1
+                length |= (byte & 0x7F) << shift
+                if not (byte & 0x80):
+                    break
+                shift += 7
+            val = b[pos:pos+length]
+            pos += length
+            fields.append((field_num, "bytes", val))
+        elif wire_type == 1:
+            val = b[pos:pos+8]
+            pos += 8
+            fields.append((field_num, "64bit", val))
+        elif wire_type == 5:
+            val = b[pos:pos+4]
+            pos += 4
+            fields.append((field_num, "32bit", val))
+        else:
+            break
+    return fields
+
+
+def cache_root() -> Path:
+    root = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "omarchy" / "agent-usage"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def read_fresh_cache(path: Path, max_age_seconds: float) -> dict[str, Any] | None:
+    if not path.is_file():
+        return None
+    try:
+        stat = path.stat()
+        if time.time() - stat.st_mtime > max_age_seconds:
+            return None
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def write_cache(path: Path, data: dict[str, Any]) -> None:
+    try:
+        tmp = path.with_suffix(f".tmp.{os.getpid()}")
+        tmp.write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
+        tmp.replace(path)
+    except Exception:
+        pass
+
+
+def scan_agy() -> dict[str, Any]:
+    home = Path.home()
+    gemini_dir = home / ".gemini" / "antigravity-cli"
+    conv_dir = gemini_dir / "conversations"
+    settings_file = gemini_dir / "settings.json"
+
+    is_vertex = False
+    if settings_file.is_file():
+        try:
+            cfg = json.loads(settings_file.read_text(encoding="utf-8"))
+            gcp_cfg = cfg.get("gcp", {})
+            if gcp_cfg.get("project") or gcp_cfg.get("location"):
+                is_vertex = True
+        except Exception:
+            pass
+
+    today = dt.datetime.now().astimezone().date()
+    recent_dates = [(today - dt.timedelta(days=i)).isoformat() for i in range(6, -1, -1)]
+    recent_map = {d: 0 for d in recent_dates}
+    today_str = today.isoformat()
+
+    model_usage: dict[str, dict[str, Any]] = {}
+    today_by_model: dict[str, int] = {}
+    active_dates: set[str] = set()
+    total_prompts = 0
+    today_prompts = 0
+    total_sessions = 0
+    today_sessions = 0
+
+    if conv_dir.is_dir():
+        for db_path in conv_dir.glob("*.db"):
+            total_sessions += 1
+            session_has_today = False
+            try:
+                con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+                cur = con.cursor()
+
+                # Step timestamps
+                step_times: dict[int, int] = {}
+                for row in cur.execute("SELECT idx, metadata FROM steps").fetchall():
+                    idx, meta = row
+                    if not meta:
+                        continue
+                    for f in parse_proto(meta):
+                        if f[0] == 1 and f[1] == "bytes":
+                            for sf in parse_proto(f[2]):
+                                if sf[0] == 1 and sf[1] == "varint":
+                                    step_times[idx] = sf[2]
+
+                for row in cur.execute("SELECT idx, data FROM gen_metadata").fetchall():
+                    idx, data = row
+                    if not data:
+                        continue
+                    f = parse_proto(data)
+                    if len(f) <= 3 or f[3][1] != "bytes":
+                        continue
+                    sub1 = parse_proto(f[3][2])
+                    model = ""
+                    inp = 0
+                    out = 0
+                    for item in sub1:
+                        if item[0] == 19 and item[1] == "bytes":
+                            model = item[2].decode("latin1", "ignore").strip()
+                        elif item[0] == 4 and item[1] == "bytes":
+                            for k in parse_proto(item[2]):
+                                if k[0] == 2 and k[1] == "varint":
+                                    inp = k[2]
+                                elif k[0] == 3 and k[1] == "varint":
+                                    out = k[2]
+
+                    if not model:
+                        model = "gemini-3.8-flash"
+
+                    total = inp + out
+                    if total <= 0:
+                        continue
+
+                    total_prompts += 1
+                    step_ts = step_times.get(idx, 0)
+                    step_date = dt.datetime.fromtimestamp(step_ts).strftime("%Y-%m-%d") if step_ts else today_str
+
+                    active_dates.add(step_date)
+                    if step_date in recent_map:
+                        recent_map[step_date] += total
+                    if step_date == today_str:
+                        today_prompts += 1
+                        session_has_today = True
+                        today_by_model[model] = today_by_model.get(model, 0) + total
+
+                    b = model_usage.setdefault(model, {
+                        "inputTokens": 0,
+                        "outputTokens": 0,
+                        "cacheReadInputTokens": 0,
+                        "cacheCreationInputTokens": 0,
+                        "cost": 0.0,
+                    })
+                    b["inputTokens"] += inp
+                    b["outputTokens"] += out
+
+                con.close()
+            except Exception:
+                pass
+
+            if session_has_today:
+                today_sessions += 1
+
+    # Also scan history.jsonl if present for prompts
+    history_file = gemini_dir / "history.jsonl"
+    if history_file.is_file():
+        try:
+            for line in history_file.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                rec = json.loads(line)
+                ts = rec.get("timestamp")
+                if ts:
+                    ts_sec = ts / 1000.0 if ts > 10_000_000_000 else float(ts)
+                    d = dt.datetime.fromtimestamp(ts_sec).strftime("%Y-%m-%d")
+                    active_dates.add(d)
+        except Exception:
+            pass
+
+    # Compute cost per model
+    total_cost = 0.0
+    for mod_name, bucket in model_usage.items():
+        pricing = get_pricing(mod_name)
+        cost = compute_cost(
+            bucket["inputTokens"],
+            bucket["outputTokens"],
+            bucket["cacheReadInputTokens"],
+            bucket["cacheCreationInputTokens"],
+            pricing,
+        )
+        bucket["cost"] = cost
+        total_cost += cost
+
+    # Optional budget config from ~/.config/omarchy/agents/agy.json
+    budget_cfg = home / ".config" / "omarchy" / "agents" / "agy.json"
+    funded = 0.0
+    if budget_cfg.is_file():
+        try:
+            b_data = json.loads(budget_cfg.read_text(encoding="utf-8"))
+            funded = float(b_data.get("fundedAmount") or 0.0)
+        except Exception:
+            pass
+
+    status_text = "Via Vertex AI" if is_vertex else "Active"
+    tier_label = "Vertex AI" if is_vertex else "Direct"
+
+    return {
+        "todayTotalTokens": sum(today_by_model.values()),
+        "todayTokensByModel": today_by_model,
+        "recentDays": [{"date": d, "messageCount": recent_map[d]} for d in recent_dates],
+        "activeDays": len(active_dates),
+        "activeDates": sorted(active_dates),
+        "todayPrompts": today_prompts,
+        "todaySessions": today_sessions,
+        "totalPrompts": total_prompts,
+        "totalSessions": total_sessions,
+        "modelUsage": model_usage,
+        "tierLabel": tier_label,
+        "usageStatusText": status_text,
+        "authHelpText": AUTH_HELP,
+        "balance": {
+            "remaining": max(0.0, funded - total_cost) if funded > 0 else 0.0,
+            "funded": funded,
+            "spent": round(total_cost, 4),
+            "currency": "USD",
+            "estimated": True,
+        },
+    }
+
+
+def scan_hermes() -> dict[str, Any]:
+    home = Path.home()
+    db_path = home / ".hermes" / "state.db"
+    today = dt.datetime.now().astimezone().date()
+    recent_dates = [(today - dt.timedelta(days=i)).isoformat() for i in range(6, -1, -1)]
+    recent_map = {d: 0 for d in recent_dates}
+    today_str = today.isoformat()
+
+    model_usage: dict[str, dict[str, Any]] = {}
+    today_by_model: dict[str, int] = {}
+    active_dates: set[str] = set()
+    total_prompts = 0
+    today_prompts = 0
+    total_sessions = 0
+    today_sessions = 0
+
+    if db_path.is_file():
+        try:
+            con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            cur = con.cursor()
+
+            # Session counts
+            for row in cur.execute("SELECT started_at, message_count FROM sessions").fetchall():
+                total_sessions += 1
+                started = row[0]
+                msg_count = row[1] or 0
+                total_prompts += msg_count
+                if started:
+                    d = dt.datetime.fromtimestamp(started).strftime("%Y-%m-%d")
+                    active_dates.add(d)
+                    if d == today_str:
+                        today_sessions += 1
+                        today_prompts += msg_count
+
+            # Model usage
+            for row in cur.execute("""
+                SELECT model, sum(input_tokens), sum(output_tokens),
+                       sum(cache_read_tokens), sum(cache_write_tokens),
+                       first_seen
+                FROM session_model_usage
+                GROUP BY model, date(first_seen, 'unixepoch')
+            """).fetchall():
+                mod, inp, out, cache_read, cache_write, first_seen = row
+                inp = inp or 0
+                out = out or 0
+                cache_read = cache_read or 0
+                cache_write = cache_write or 0
+                tot = inp + out + cache_read + cache_write
+                if tot <= 0:
+                    continue
+
+                d = dt.datetime.fromtimestamp(first_seen).strftime("%Y-%m-%d") if first_seen else today_str
+                active_dates.add(d)
+                if d in recent_map:
+                    recent_map[d] += tot
+                if d == today_str:
+                    today_by_model[mod] = today_by_model.get(mod, 0) + tot
+
+                b = model_usage.setdefault(mod, {
+                    "inputTokens": 0,
+                    "outputTokens": 0,
+                    "cacheReadInputTokens": 0,
+                    "cacheCreationInputTokens": 0,
+                    "cost": 0.0,
+                })
+                b["inputTokens"] += inp
+                b["outputTokens"] += out
+                b["cacheReadInputTokens"] += cache_read
+                b["cacheCreationInputTokens"] += cache_write
+
+            con.close()
+        except Exception:
+            pass
+
+    # Compute cost per model
+    total_cost = 0.0
+    for mod_name, bucket in model_usage.items():
+        pricing = get_pricing(mod_name)
+        cost = compute_cost(
+            bucket["inputTokens"],
+            bucket["outputTokens"],
+            bucket["cacheReadInputTokens"],
+            bucket["cacheCreationInputTokens"],
+            pricing,
+        )
+        bucket["cost"] = cost
+        total_cost += cost
+
+    budget_cfg = home / ".config" / "omarchy" / "agents" / "hermes.json"
+    funded = 0.0
+    if budget_cfg.is_file():
+        try:
+            b_data = json.loads(budget_cfg.read_text(encoding="utf-8"))
+            funded = float(b_data.get("fundedAmount") or 0.0)
+        except Exception:
+            pass
+
+    return {
+        "todayTotalTokens": sum(today_by_model.values()),
+        "todayTokensByModel": today_by_model,
+        "recentDays": [{"date": d, "messageCount": recent_map[d]} for d in recent_dates],
+        "activeDays": len(active_dates),
+        "activeDates": sorted(active_dates),
+        "todayPrompts": today_prompts,
+        "todaySessions": today_sessions,
+        "totalPrompts": total_prompts,
+        "totalSessions": total_sessions,
+        "modelUsage": model_usage,
+        "usageStatusText": "Active",
+        "authHelpText": "Hermes AI Agent",
+        "balance": {
+            "remaining": max(0.0, funded - total_cost) if funded > 0 else 0.0,
+            "funded": funded,
+            "spent": round(total_cost, 4),
+            "currency": "USD",
+            "estimated": True,
+        },
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--force", action="store_true", help="rescan and ignore caches")
+    parser.add_argument("--limits-only", action="store_true", help="reuse any recent scan")
+    parser.add_argument("--cache-seconds", type=float, default=20)
+    args = parser.parse_args()
+
+    prog = Path(sys.argv[0]).stem
+    is_hermes = "hermes" in prog
+
+    agent_id = "hermes" if is_hermes else "agy"
+    agent_name = "Hermes" if is_hermes else "Antigravity"
+    tier_label = "Local / Vertex" if is_hermes else "Vertex AI"
+
+    cache_file = cache_root() / f"{agent_id}.json"
+    max_age = 0 if args.force else (900 if args.limits_only else args.cache_seconds)
+    cached = read_fresh_cache(cache_file, max_age)
+    if cached is not None:
+        print(json.dumps(cached, separators=(",", ":"), sort_keys=True))
+        return 0
+
+    stats = scan_hermes() if is_hermes else scan_agy()
+
+    record: dict[str, Any] = {
+        "schemaVersion": 1,
+        "id": agent_id,
+        "name": agent_name,
+        "updatedAt": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "ready": stats["totalPrompts"] > 0 or stats["todayTotalTokens"] > 0 or bool(stats["modelUsage"]),
+        "hasLocalStats": True,
+        "tierLabel": tier_label,
+        "limits": [],
+    }
+    record.update(stats)
+
+    write_cache(cache_file, record)
+    print(json.dumps(record, separators=(",", ":"), sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

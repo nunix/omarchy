@@ -22,10 +22,26 @@ Panel {
   // The selection follows the provider, not the slot it happens to sit in: a
   // provider whose first scan lands while the panel is open would otherwise
   // shift the list underneath you and swap out what you were reading.
+  property string defaultAgentName: ""
+  FileView {
+    id: defaultAgentFile
+    path: (Quickshell.env("HOME") || "") + "/.config/omarchy/defaults/agent"
+    watchChanges: true
+    printErrors: false
+    onLoaded: root.defaultAgentName = (text() || "").trim()
+    onFileChanged: reload()
+  }
+
   property string selectedProviderId: ""
   readonly property int providerIndex: {
-    for (var i = 0; i < providers.length; i++)
-      if (providers[i].providerId === selectedProviderId) return i
+    if (selectedProviderId !== "") {
+      for (var i = 0; i < providers.length; i++)
+        if (providers[i].providerId === selectedProviderId) return i
+    }
+    if (defaultAgentName !== "") {
+      for (var j = 0; j < providers.length; j++)
+        if (providers[j].providerId === defaultAgentName) return j
+    }
     return 0
   }
   readonly property var provider: providers.length > 0 ? providers[providerIndex] : null
@@ -168,10 +184,16 @@ Panel {
   }
 
   function balanceDetailText(b) {
-    if (!b || !(b.funded > 0)) return ""
-    var text = formatMoney(b.spent, b.currency) + " spent of " + formatMoney(b.funded, b.currency) + " funded"
-    if (b.estimated) text += " · estimated"
-    return text
+    if (!b) return ""
+    if (b.funded > 0) {
+      var text = formatMoney(b.spent, b.currency) + " spent of " + formatMoney(b.funded, b.currency) + " funded"
+      if (b.estimated) text += " · estimated"
+      return text
+    }
+    if (b.spent > 0) {
+      return (b.estimated ? "Estimated" : "Total") + " consumption across tracked sessions"
+    }
+    return ""
   }
 
   // ---------------------------------------------------------------- content
@@ -238,13 +260,15 @@ Panel {
       var output = Number(bucket.outputTokens || 0)
       var cacheRead = Number(bucket.cacheReadInputTokens || 0)
       var cacheWrite = Number(bucket.cacheCreationInputTokens || 0)
+      var cost = Number(bucket.cost || bucket.estimatedCost || 0)
       rows.push({
         name: usage.friendlyModelName(id),
         total: input + output + cacheRead + cacheWrite,
         input: input,
         output: output,
         cacheRead: cacheRead,
-        cacheWrite: cacheWrite
+        cacheWrite: cacheWrite,
+        cost: cost
       })
     }
     rows.sort(function(a, b) { return b.total - a.total })
@@ -253,10 +277,12 @@ Panel {
 
   function modelTooltip(row) {
     if (!row) return ""
-    return "In " + usage.formatTokenCount(row.input)
+    var text = "In " + usage.formatTokenCount(row.input)
       + " · out " + usage.formatTokenCount(row.output)
       + " · cache read " + usage.formatTokenCount(row.cacheRead)
       + " · cache write " + usage.formatTokenCount(row.cacheWrite)
+    if (row.cost > 0) text += " · Est. " + root.formatMoney(row.cost, "USD")
+    return text
   }
 
   // Only speaks up when the numbers cover more than this machine.
@@ -332,7 +358,11 @@ Panel {
     function hide(): void { root.close() }
     function toggle(): void { root.toggle() }
     function refresh(): string { root.refreshNow(); return "ok" }
-    function next(): string { root.selectProvider(root.providerIndex + 1); return "ok" }
+    function next(): string { providerDropdown.close(); root.selectProvider(root.providerIndex + 1); return "ok" }
+    function prev(): string { providerDropdown.close(); root.selectProvider(root.providerIndex - 1); return "ok" }
+    function select(id: string): string { providerDropdown.close(); root.selectedProviderId = id; return "ok" }
+    function openDropdown(): string { providerDropdown.open(); return "ok" }
+    function closeDropdown(): string { providerDropdown.close(); return "ok" }
   }
 
   BarIconButton {
@@ -458,38 +488,64 @@ Panel {
             wrapMode: Text.WordWrap
           }
 
-          // ---------- Provider switch ----------
+          // ---------- Provider switch (Carousel + Dropdown) ----------
           Row {
             id: providerSwitch
             visible: root.providers.length > 1
             width: parent.width
-            spacing: Style.spacing.md
+            spacing: Style.space(8)
 
-            readonly property real cellWidth: root.providers.length > 0
-              ? (width - spacing * (root.providers.length - 1)) / root.providers.length
-              : 0
+            Button {
+              id: prevButton
+              width: Style.spacing.controlHeight
+              height: Style.spacing.controlHeight
+              iconText: "󰅁"
+              tooltipText: "Previous agent"
+              bordered: true
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onClicked: {
+                root.cursorActive = true
+                root.selectProvider(root.providerIndex - 1)
+              }
+            }
 
-            Repeater {
-              model: root.providers
-
-              Button {
-                required property var modelData
-                required property int index
-
-                width: providerSwitch.cellWidth
-                text: modelData.providerName
-                selected: index === root.providerIndex
-                hasCursor: root.cursorActive && index === root.providerIndex
-                bordered: true
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-                fontSize: Style.font.bodySmall
-                verticalPadding: Style.spacing.controlPaddingY
-                onClicked: {
-                  root.cursorActive = true
-                  root.selectProvider(index)
+            Dropdown {
+              id: providerDropdown
+              width: providerSwitch.width - (prevButton.width * 2) - (providerSwitch.spacing * 2)
+              showLabel: false
+              rowHeight: Style.spacing.controlHeight
+              value: root.provider ? root.provider.providerId : ""
+              options: {
+                var opts = []
+                for (var i = 0; i < root.providers.length; i++) {
+                  opts.push({
+                    value: root.providers[i].providerId,
+                    label: root.providers[i].providerName
+                  })
                 }
-                onHovered: function(isHovered) { if (isHovered) root.cursorActive = true }
+                return opts
+              }
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onChanged: function(val) {
+                root.cursorActive = true
+                root.selectedProviderId = val
+              }
+            }
+
+            Button {
+              id: nextButton
+              width: Style.spacing.controlHeight
+              height: Style.spacing.controlHeight
+              iconText: "󰅂"
+              tooltipText: "Next agent"
+              bordered: true
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onClicked: {
+                root.cursorActive = true
+                root.selectProvider(root.providerIndex + 1)
               }
             }
           }

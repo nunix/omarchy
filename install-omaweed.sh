@@ -43,7 +43,7 @@ sudo zypper --non-interactive refresh
 
 log "Installing base development tools and runtime dependencies..."
 sudo zypper --non-interactive in --no-recommends \
-    git curl wget sudo tar xz jq gcc gcc-c++ make cmake cargo rust zig python3 \
+    git curl wget sudo tar xz jq gcc gcc-c++ make cmake cargo rust zig python3 lua54 \
     which gzip xdg-user-dirs fontconfig systemd dbus-1 polkit polkit-gnome \
     qt6-declarative-devel qt6-quickcontrols2-devel meson ninja libpulse-devel \
     gtk4-layer-shell-devel libevdev-devel libinput-devel sassc systemd-devel
@@ -51,6 +51,7 @@ sudo zypper --non-interactive in --no-recommends \
 log "Installing Hyprland Wayland desktop suite & QuickShell runtime..."
 sudo zypper --non-interactive in --no-recommends \
     hyprland waybar rofi-wayland foot kitty ghostty btop fastfetch \
+    nautilus python313-nautilus imv loupe swayimg \
     playerctl pavucontrol pipewire wireplumber socat bc ripgrep fd fzf bat eza \
     grim slurp wl-clipboard cliphist swappy wlogout swayidle swaylock wlsunset \
     ImageMagick vips-tools libvips42 NetworkManager snapper btrfsmaintenance \
@@ -102,6 +103,7 @@ translate_pkg() {
         noto-fonts) echo "google-noto-fonts" ;;
         noto-fonts-cjk) echo "google-noto-sans-cjk-fonts" ;;
         noto-fonts-emoji) echo "google-noto-coloremoji-fonts" ;;
+        nautilus-python) echo "python313-nautilus" ;;
         quickshell|qs) echo "noctalia-qs" ;;
         *) echo "$p" ;;
     esac
@@ -395,6 +397,7 @@ sudo mkdir -p /usr/lib/polkit-gnome
 if [ -f /usr/libexec/polkit-gnome-authentication-agent-1 ] && [ ! -f /usr/lib/polkit-gnome/polkit-gnome-authentication-agent-1 ]; then
     sudo ln -sf /usr/libexec/polkit-gnome-authentication-agent-1 /usr/lib/polkit-gnome/polkit-gnome-authentication-agent-1
 fi
+[ -f /usr/bin/lua5.4 ] && [ ! -e /usr/bin/lua ] && sudo ln -sf /usr/bin/lua5.4 /usr/bin/lua 2>/dev/null || true
 
 # Ensure /usr/bin symlinks exist for sudo secure_path without clobbering existing files
 for bin in /usr/local/bin/*; do
@@ -583,6 +586,15 @@ sudo usermod -aG wheel,video,audio,input,render "$USER" 2>/dev/null || true
 log "Provisioning user dotfiles, fonts, and runtime services..."
 mkdir -p "$HOME/.config"
 cp -R /usr/share/omarchy/config/* "$HOME/.config/"
+
+# Setup default applications and mime associations (Loupe for images/GIFs, Nautilus for files)
+sudo mkdir -p /usr/share/applications
+sudo cp -f /usr/share/omarchy/default/applications/mimeapps.list /usr/share/applications/mimeapps.list 2>/dev/null || true
+cp -f /usr/share/omarchy/default/applications/mimeapps.list "$HOME/.config/mimeapps.list" 2>/dev/null || true
+
+# Setup Nautilus Python extensions (LocalSend, Transcode)
+mkdir -p "$HOME/.local/share/nautilus-python/extensions"
+cp -f /usr/share/omarchy/default/nautilus-python/extensions/*.py "$HOME/.local/share/nautilus-python/extensions/" 2>/dev/null || true
 
 # Remove legacy v3 conf files in ~/.config/hypr to ensure hyprland.lua takes effect
 rm -f "$HOME/.config/hypr/hyprland.conf" "$HOME/.config/hypr/bindings.conf" "$HOME/.config/hypr/input.conf" "$HOME/.config/hypr/looknfeel.conf" "$HOME/.config/hypr/autostart.conf" 2>/dev/null || true

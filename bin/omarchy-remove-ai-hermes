@@ -36,6 +36,13 @@ if [[ -f $HOME/.hermes/hermes-agent/.hermes-bootstrap-complete ]]; then
     "$HOME/.hermes/bin" \
     "$HOME/.hermes/node"
 
+  # The Electron build (hermes desktop) installs its own launcher entry and
+  # icon set outside ~/.hermes, so they survive the rm -rf above untouched
+  # unless removed here too.
+  rm -f "$HOME/.local/share/applications/hermes.desktop"
+  find "$HOME/.local/share/icons/hicolor" -maxdepth 3 -name 'hermes.png' -path '*/apps/*' -delete 2>/dev/null || true
+  update-desktop-database "$HOME/.local/share/applications" &>/dev/null || true
+
   # Only the wrappers pointing into ~/.hermes, matched as a plain string: the
   # path carries a dot, so an unanchored pattern would also claim a wrapper
   # pointing at a sibling like ~/xhermes.

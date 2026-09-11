@@ -1,0 +1,10 @@
+#!/bin/bash
+
+# omarchy:summary=Search OBS/Packman/vendor packages via OPI and install
+# omarchy:requires-sudo=true
+
+query=$(gum input --prompt 'OPI search> ' --placeholder 'package name or vendor keyword (chrome, vscode, spotify...)')
+
+if [[ -n $query ]]; then
+  opi "$query"
+fi

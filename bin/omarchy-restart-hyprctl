@@ -3,3 +3,10 @@
 # omarchy:summary=Reload hyprland configuration (used by the Omarchy theme switching).
 
 hyprctl reload >/dev/null
+
+STATE_FILE="${XDG_RUNTIME_DIR:-/tmp}/omarchy-disabled-monitors.txt"
+if [[ -f $STATE_FILE ]]; then
+  while IFS= read -r mon; do
+    [[ -n $mon ]] && hyprctl eval "hl.monitor({ output = \"$mon\", disabled = true })" >/dev/null 2>&1
+  done < "$STATE_FILE"
+fi

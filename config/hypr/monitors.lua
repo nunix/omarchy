@@ -20,3 +20,16 @@ hl.monitor({ output = "", mode = "preferred", position = "auto", scale = omarchy
 -- app for a change to reach it.
 local omarchy_gdk_scale = 2
 hl.env("GDK_SCALE", tostring(omarchy_gdk_scale))
+
+-- Session-scoped disabled displays (kept during same session, reset on reboot via tmpfs)
+local runtime_dir = os.getenv("XDG_RUNTIME_DIR") or ("/run/user/" .. tostring(os.getenv("UID") or "1000"))
+local disabled_state_file = io.open(runtime_dir .. "/omarchy-disabled-monitors.txt", "r")
+if disabled_state_file then
+  for line in disabled_state_file:lines() do
+    local mon_name = line:match("^%s*(.-)%s*$")
+    if mon_name and mon_name ~= "" then
+      hl.monitor({ output = mon_name, disabled = true })
+    end
+  end
+  disabled_state_file:close()
+end

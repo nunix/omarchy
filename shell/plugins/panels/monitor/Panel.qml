@@ -300,7 +300,11 @@ Panel {
     if (!name) return
     if (enabled && root.enabledDisplayCount <= 1) return
 
-    actionProc.command = ["hyprctl", "keyword", "monitor", name + (enabled ? ",disable" : ",preferred,auto,auto")]
+    var stateFile = "${XDG_RUNTIME_DIR:-/tmp}/omarchy-disabled-monitors.txt"
+    var cmd = enabled
+      ? 'f="' + stateFile + '"; touch "$f"; grep -qx "' + name + '" "$f" || echo "' + name + '" >> "$f"; hyprctl eval "hl.monitor({ output = \\\"' + name + '\\\", disabled = true })" 2>/dev/null || hyprctl keyword monitor "' + name + ',disable"'
+      : 'f="' + stateFile + '"; [ -f "$f" ] && sed -i "/^' + name + '$/d" "$f"; hyprctl eval "hl.monitor({ output = \\\"' + name + '\\\", disabled = false, mode = \\\"preferred\\\", position = \\\"auto\\\" })" 2>/dev/null; hyprctl reload 2>/dev/null || hyprctl keyword monitor "' + name + ',preferred,auto,auto"'
+    actionProc.command = ["bash", "-c", cmd]
     if (!actionProc.running) actionProc.running = true
   }
 

@@ -1,0 +1,29 @@
+#!/bin/bash
+
+# omarchy:summary=Show a fuzzy-finder TUI for picking installed Flatpak apps to remove.
+
+fzf_args=(
+  --multi
+  --with-nth 1,3,4
+  --delimiter '\t'
+  --preview 'flatpak info {2}'
+  --preview-label='alt-p: toggle description, alt-j/k: scroll, tab: multi-select'
+  --preview-label-pos='bottom'
+  --preview-window 'down:65%:wrap'
+  --bind 'alt-p:toggle-preview'
+  --bind 'alt-d:preview-half-page-down,alt-u:preview-half-page-up'
+  --bind 'alt-k:preview-up,alt-j:preview-down'
+  --color 'pointer:red,marker:red'
+)
+
+if ! flatpak list --app --user &>/dev/null || [[ -z $(flatpak list --app --user --columns=application) ]]; then
+  echo 'No Flatpak apps installed.'
+  exit 1
+fi
+
+app_ids=$(flatpak list --app --user --columns=name,application,version,origin | fzf "${fzf_args[@]}" | cut -f2)
+
+if [[ -n $app_ids ]]; then
+  echo "$app_ids" | tr '\n' ' ' | xargs flatpak uninstall -y --user
+  omarchy-show-done
+fi
